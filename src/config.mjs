@@ -105,8 +105,9 @@ export function validateUrl(raw) {
   } catch {
     throw new ConfigError(`Invalid SWARMDESK_URL: ${redactKey(candidate)}`);
   }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
-    throw new ConfigError("SWARMDESK_URL must use http: or https:.");
+  const local = ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname);
+  if (parsed.protocol !== "https:" && !(parsed.protocol === "http:" && local)) {
+    throw new ConfigError("SWARMDESK_URL must use https: (http: only for localhost).");
   }
   const pathname = parsed.pathname.replace(/\/+$/, "");
   return `${parsed.origin}${pathname}`;

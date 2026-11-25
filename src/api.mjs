@@ -65,96 +65,90 @@ async function parseJsonResponse(res, key) {
   return redactValue(data, key);
 }
 
+async function postForm(ctx, path, fields, secretKey = "") {
+  const body = new URLSearchParams();
+  for (const [k, v] of Object.entries(fields)) {
+    if (v !== undefined && v !== null && v !== "") {
+      body.set(k, String(v));
+    }
+  }
+  let res;
+  try {
+    res = await ctx.fetchImpl(`${ctx.baseUrl}${path}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        Accept: "application/json",
+      },
+      body: body.toString(),
+    });
+  } catch (err) {
+    throw new DeskApiError(err?.message || "Network request failed", { key: secretKey });
+  }
+  return parseJsonResponse(res, secretKey);
+}
+
+/** The form fields of a desk claim: the key, and the optional step, harness and model. */
+function claimFields(ctx, opts) {
+  const activeKey = opts.key !== undefined ? validateKey(opts.key) : validateKey(ctx.key);
+  const harness = opts.harness !== undefined ? validateHarness(opts.harness) : ctx.harness;
+  const model = opts.model !== undefined ? validateModel(opts.model) : ctx.model;
+  const fields = { key: activeKey };
+  if (opts.step !== undefined && opts.step !== null && opts.step !== "") {
+    const stepNum = Number(opts.step);
+    if (!Number.isInteger(stepNum) || stepNum <= 0) {
+      throw new DeskApiError("step must be a positive integer.");
+    }
+    fields.step = String(stepNum);
+  }
+  if (opts.another) fields.another = "1";
+  if (harness) fields.harness = harness;
+  if (model) fields.model = model;
+  return fields;
+}
+
+async function getSteps(ctx, slug) {
+  const problem = validateSlug(slug, "problem");
+  let res;
+  try {
+    res = await ctx.fetchImpl(`${ctx.baseUrl}/p/${encodeURIComponent(problem)}/steps.json`, {
+      method: "GET",
+      headers: { Accept: "application/json" },
+    });
+  } catch (err) {
+    throw new DeskApiError(err?.message || "Network request failed", { key: ctx.key || "" });
+  }
+  return parseJsonResponse(res, ctx.key || "");
+}
+
 /**
  * Creates a fetch-based Swarmdesk HTTP API client.
  */
-export function createClient({
-  url,
-  key,
-  harness,
-  model,
-  fetchImpl = globalThis.fetch,
-} = {}) {
+export function createClient({ url, key, harness, model, fetchImpl = globalThis.fetch } = {}) {
   if (typeof fetchImpl !== "function") {
     throw new Error("A fetch implementation is required.");
   }
-  const baseUrl = validateUrl(url);
-  const validatedKey = key !== undefined ? validateKey(key) : undefined;
-  const defaultHarness = validateHarness(harness);
-  const defaultModel = validateModel(model);
-
-  async function postForm(path, fields, secretKey = "") {
-    const body = new URLSearchParams();
-    for (const [k, v] of Object.entries(fields)) {
-      if (v !== undefined && v !== null && v !== "") {
-        body.set(k, String(v));
-      }
-    }
-    let res;
-    try {
-      res = await fetchImpl(`${baseUrl}${path}`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/x-www-form-urlencoded",
-          Accept: "application/json",
-        },
-        body: body.toString(),
-      });
-    } catch (err) {
-      throw new DeskApiError(err?.message || "Network request failed", { key: secretKey });
-    }
-    return parseJsonResponse(res, secretKey);
-  }
-
+  const ctx = {
+    fetchImpl,
+    baseUrl: validateUrl(url),
+    key: key !== undefined ? validateKey(key) : undefined,
+    harness: validateHarness(harness),
+    model: validateModel(model),
+  };
   return {
-    baseUrl,
+    baseUrl: ctx.baseUrl,
     async claim(slug, opts = {}) {
       const problem = validateSlug(slug, "problem");
-      const activeKey = opts.key !== undefined ? validateKey(opts.key) : validateKey(validatedKey);
-      const effectiveHarness =
-        opts.harness !== undefined ? validateHarness(opts.harness) : defaultHarness;
-      const effectiveModel = opts.model !== undefined ? validateModel(opts.model) : defaultModel;
-      const fields = { key: activeKey };
-
-      if (opts.step !== undefined && opts.step !== null && opts.step !== "") {
-        const stepNum = Number(opts.step);
-        if (!Number.isInteger(stepNum) || stepNum <= 0) {
-          throw new DeskApiError("step must be a positive integer.");
-        }
-        fields.step = String(stepNum);
-      }
-      if (opts.another) fields.another = "1";
-      if (effectiveHarness) fields.harness = effectiveHarness;
-      if (effectiveModel) fields.model = effectiveModel;
-
-      return postForm(`/p/${encodeURIComponent(problem)}/desk/next`, fields, activeKey);
+      const fields = claimFields(ctx, opts);
+      return postForm(ctx, `/p/${encodeURIComponent(problem)}/desk/next`, fields, fields.key);
     },
-
     async beat(leaseId) {
-      const lease = validateLeaseId(leaseId);
-      return postForm("/desk/beat", { lease }, validatedKey || "");
+      return postForm(ctx, "/desk/beat", { lease: validateLeaseId(leaseId) }, ctx.key || "");
     },
-
     async release(leaseId, reason) {
-      const lease = validateLeaseId(leaseId);
-      const validReason = validateReleaseReason(reason);
-      return postForm("/desk/release", { lease, reason: validReason }, validatedKey || "");
+      const fields = { lease: validateLeaseId(leaseId), reason: validateReleaseReason(reason) };
+      return postForm(ctx, "/desk/release", fields, ctx.key || "");
     },
-
-    async getSteps(slug) {
-      const problem = validateSlug(slug, "problem");
-      let res;
-      try {
-        res = await fetchImpl(`${baseUrl}/p/${encodeURIComponent(problem)}/steps.json`, {
-          method: "GET",
-          headers: { Accept: "application/json" },
-        });
-      } catch (err) {
-        throw new DeskApiError(err?.message || "Network request failed", {
-          key: validatedKey || "",
-        });
-      }
-      return parseJsonResponse(res, validatedKey || "");
-    },
+    getSteps: (slug) => getSteps(ctx, slug),
   };
 }

@@ -171,16 +171,7 @@ export async function runCheck({
   };
 }
 
-export async function submitStep({
-  cwd = process.cwd(),
-  step,
-  leaseId,
-  client,
-  leaseFile = null,
-  dryRun = false,
-  execFn = runExecFile,
-  env = process.env,
-} = {}) {
+function validateSubmission(step, client, dryRun) {
   if (!step || !Number.isInteger(Number(step.id)) || Number(step.id) <= 0) {
     throw new Error("submitStep requires a valid step.id.");
   }
@@ -196,77 +187,65 @@ export async function submitStep({
   if (!dryRun && (!client || typeof client.release !== "function")) {
     throw new Error("submitStep requires an API client.");
   }
+}
 
-  const stepId = Number(step.id);
-  const branch = `step-${stepId}`;
-  const commitMessage = `step-${stepId}`;
-  const cleanEnv = scrubDeskKeyEnv(env);
+/** Switches to `branch`, creating it if it does not exist yet. */
+async function checkoutBranch(execFn, branch, opts) {
+  const cur = await execOrThrow(execFn, "git", ["rev-parse", "--abbrev-ref", "HEAD"], opts);
+  if (cur.stdout.trim() === branch) return;
+  const ref = await execFn("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], opts);
+  const args = ref.code === 0 ? ["checkout", branch] : ["checkout", "-b", branch];
+  await execOrThrow(execFn, "git", args, opts);
+}
 
-  const statusRes = await execOrThrow(execFn, "git", ["status", "--porcelain", "-uall"], {
-    cwd,
-    env: cleanEnv,
-  });
-  assertSingleChangedFile(statusRes.stdout, step.file, {
-    ignoreFiles: [".swarmdesk-lease.json"],
-  });
+/** Commits the one changed file as `step-<id>`, pushes it and opens the pull request. */
+async function commitPushAndOpenPr(execFn, { file, branch, message, repo }, opts) {
+  await execOrThrow(execFn, "git", ["add", "--", file], opts);
+  await execOrThrow(execFn, "git", ["commit", "-m", message], opts);
+  await execOrThrow(execFn, "git", ["push", "-u", "origin", branch], opts);
+  const args = ["pr", "create", "--repo", repo, "--title", message, "--body", ""];
+  const pr = await execOrThrow(execFn, "gh", args, opts);
+  return pr.stdout.trim();
+}
 
-  const checkRes = await runCheck({ cwd, target: step.target, execFn, env: cleanEnv });
-  if (!checkRes.ok) {
-    const detail = (checkRes.stderr || checkRes.stdout).trim();
+/** Checks that exactly the step's file changed and that the local check passes. */
+async function verifyWorkingCopy(execFn, step, opts) {
+  const status = await execOrThrow(execFn, "git", ["status", "--porcelain", "-uall"], opts);
+  assertSingleChangedFile(status.stdout, step.file, { ignoreFiles: [".swarmdesk-lease.json"] });
+  const check = await runCheck({ cwd: opts.cwd, target: step.target, execFn, env: opts.env });
+  if (!check.ok) {
+    const detail = (check.stderr || check.stdout).trim();
     throw new Error(`scripts/check.sh ${step.target} failed: ${detail}`);
   }
+  return check;
+}
 
-  if (dryRun) {
-    return {
-      ok: true,
-      dryRun: true,
-      branch,
-      commitMessage,
-      file: normalizeRepoPath(step.file),
-      target: step.target,
-      check: checkRes,
-    };
-  }
+export async function submitStep({
+  cwd = process.cwd(),
+  step,
+  leaseId,
+  client,
+  leaseFile = null,
+  dryRun = false,
+  execFn = runExecFile,
+  env = process.env,
+} = {}) {
+  validateSubmission(step, client, dryRun);
+  const branch = `step-${Number(step.id)}`;
+  const commitMessage = branch;
+  const file = normalizeRepoPath(step.file);
+  const opts = { cwd, env: scrubDeskKeyEnv(env) };
+  const check = await verifyWorkingCopy(execFn, step, opts);
+  const base = { ok: true, branch, commitMessage, file, target: step.target };
+  if (dryRun) return { ...base, dryRun: true, check };
 
-  const curBranchRes = await execOrThrow(
+  await checkoutBranch(execFn, branch, opts);
+  const prUrl = await commitPushAndOpenPr(
     execFn,
-    "git",
-    ["rev-parse", "--abbrev-ref", "HEAD"],
-    { cwd, env: cleanEnv },
+    { file, branch, message: commitMessage, repo: step.repo },
+    opts,
   );
-  if (curBranchRes.stdout.trim() !== branch) {
-    const refRes = await execFn("git", ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], {
-      cwd,
-      env: cleanEnv,
-    });
-    const checkoutArgs = refRes.code === 0 ? ["checkout", branch] : ["checkout", "-b", branch];
-    await execOrThrow(execFn, "git", checkoutArgs, { cwd, env: cleanEnv });
-  }
-
-  const normalizedFile = normalizeRepoPath(step.file);
-  await execOrThrow(execFn, "git", ["add", "--", normalizedFile], { cwd, env: cleanEnv });
-  await execOrThrow(execFn, "git", ["commit", "-m", commitMessage], { cwd, env: cleanEnv });
-  await execOrThrow(execFn, "git", ["push", "-u", "origin", branch], { cwd, env: cleanEnv });
-
-  const prRes = await execOrThrow(
-    execFn,
-    "gh",
-    ["pr", "create", "--repo", step.repo, "--title", commitMessage, "--body", ""],
-    { cwd, env: cleanEnv },
-  );
-
-  const releaseRes = await client.release(leaseId, "submitted");
-  if (leaseFile) {
-    removeLeaseFile(leaseFile);
-  }
-
-  return {
-    ok: true,
-    branch,
-    commitMessage,
-    file: normalizedFile,
-    target: step.target,
-    prUrl: prRes.stdout.trim(),
-    released: releaseRes,
-  };
+  const released = await client.release(leaseId, "submitted");
+  if (leaseFile) removeLeaseFile(leaseFile);
+  return { ...base, prUrl, released };
 }

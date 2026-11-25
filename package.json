@@ -2,6 +2,21 @@
   "name": "swarmdesk-cli",
   "version": "0.1.0",
   "description": "Zero-dependency CLI, overnight loop runner, and MCP server for Swarmdesk",
+  "keywords": [
+    "swarmdesk",
+    "mcp",
+    "ai-agents",
+    "cli",
+    "model-context-protocol"
+  ],
+  "homepage": "https://joinswarmdesk.com",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/TobiasPol/swarmdesk-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/TobiasPol/swarmdesk-cli/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=20.0.0"
@@ -9,6 +24,13 @@
   "bin": {
     "swarmdesk": "./bin/swarmdesk.mjs"
   },
+  "files": [
+    "bin",
+    "src",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ],
   "exports": {
     ".": "./src/api.mjs",
     "./config": "./src/config.mjs",

@@ -75,6 +75,119 @@ async function releaseSafely(client, leaseId, reason, leaseFile) {
   }
 }
 
+function checkLoopArgs(client, problem, cmd, maxSteps) {
+  if (!client) throw new Error("runLoop requires an API client.");
+  const slug = validateSlug(problem, "problem");
+  if (typeof cmd !== "string" || !cmd.trim()) {
+    throw new Error("runLoop requires a non-empty --cmd command.");
+  }
+  const limit = Number(maxSteps);
+  if (!Number.isFinite(limit) || limit <= 0) {
+    throw new Error("maxSteps must be a positive finite number.");
+  }
+  return { slug, limit };
+}
+
+/** Gives the lease back and returns the outcome that records it. */
+async function giveBack(ctx, lease, outcome, reason, extra = {}) {
+  await releaseSafely(ctx.client, lease.id, reason, ctx.leaseFile);
+  return { ...outcome, status: "released", reason, ...extra };
+}
+
+/** What happens to a step after the agent command ran: give it back, or check and submit. */
+async function settleStep(ctx, step, lease, cmdRes, childEnv, outcome) {
+  if (ctx.state.interrupted) return giveBack(ctx, lease, outcome, "out_of_time");
+  if (cmdRes.code !== 0) {
+    ctx.log(`Agent command exited with code ${cmdRes.code} on step-${step.id}; releasing.`);
+    return giveBack(ctx, lease, outcome, "approach_blocked", { cmdCode: cmdRes.code });
+  }
+  const checkRes = await ctx.runCheckFn({ cwd: ctx.cwd, target: step.target, env: childEnv });
+  if (!checkRes.ok) {
+    ctx.log(`Check failed for step-${step.id} (${step.target}); releasing.`);
+    return giveBack(ctx, lease, outcome, "approach_blocked", { checkOk: false });
+  }
+  if (!ctx.submit) return giveBack(ctx, lease, outcome, "other", { checkOk: true });
+  const subRes = await ctx.submitFn({
+    cwd: ctx.cwd,
+    step,
+    leaseId: lease.id,
+    client: ctx.client,
+    leaseFile: ctx.leaseFile,
+    env: childEnv,
+  });
+  const prUrl = subRes.prUrl || "";
+  return { ...outcome, status: "submitted", reason: "submitted", checkOk: true, prUrl };
+}
+
+/** After an error: give the lease back if it may still be held, never throwing again. */
+async function giveBackAfterError(ctx, lease) {
+  try {
+    await releaseSafely(ctx.client, lease.id, "other", ctx.leaseFile);
+  } catch {
+    if (ctx.leaseFile) removeLeaseFile(ctx.leaseFile);
+  }
+}
+
+/** Runs the agent command on one claimed step, renewing its lease meanwhile. */
+async function runOneStep(ctx, claimRes) {
+  const { step, lease } = claimRes;
+  if (ctx.leaseFile) {
+    const record = buildLeaseRecord({ claimResult: claimRes, problem: ctx.slug, url: ctx.client.baseUrl });
+    writeLeaseFile(ctx.leaseFile, record);
+  }
+  const hb = startHeartbeat({
+    client: ctx.client,
+    leaseId: lease.id,
+    intervalMs: ctx.heartbeatIntervalMs,
+    leaseFile: ctx.leaseFile,
+    registerSignals: false,
+    onError: (err) => ctx.log(`Heartbeat warning for step-${step.id}: ${safeErrorMessage(err)}`),
+  });
+  const outcome = { stepId: step.id, target: step.target, leaseId: lease.id, status: "released", reason: "other" };
+  let settled = false;
+  try {
+    const childEnv = buildChildEnv(ctx.baseEnv, step);
+    ctx.log(`Claimed step-${step.id} (${step.target}); running agent command...`);
+    const cmdRes = await ctx.spawnCmdFn(ctx.cmd, { cwd: ctx.cwd, env: childEnv });
+    const result = await settleStep(ctx, step, lease, cmdRes, childEnv, outcome);
+    settled = true;
+    return result;
+  } catch (err) {
+    ctx.log(`Loop step-${step.id} error: ${safeErrorMessage(err)}`);
+    if (!settled) await giveBackAfterError(ctx, lease);
+    return { ...outcome, status: "error", error: safeErrorMessage(err) };
+  } finally {
+    hb.stop();
+  }
+}
+
+/** True when the loop should wait for a step to open; false when it should stop. */
+async function waitForOpenStep(ctx, claimRes) {
+  if (!ctx.waitOnEmpty || ctx.state.emptyPolls >= ctx.maxEmptyPolls || ctx.state.interrupted) {
+    return false;
+  }
+  ctx.state.emptyPolls += 1;
+  const waitSec = Number(claimRes?.retry_after_seconds) || 180;
+  ctx.log(`No open steps available; waiting ${waitSec}s...`);
+  await ctx.sleepFn(waitSec * 1000);
+  return true;
+}
+
+async function loopSteps(ctx, limit) {
+  const results = [];
+  const done = (stoppedReason) => ({ completedSteps: results.length, results, stoppedReason });
+  while (results.length < limit && !ctx.state.interrupted) {
+    const claimRes = await ctx.client.claim(ctx.slug, { harness: ctx.harness, model: ctx.model });
+    if (!claimRes?.step || !claimRes?.lease) {
+      if (await waitForOpenStep(ctx, claimRes)) continue;
+      return done(ctx.state.interrupted ? "interrupted" : "no_open_steps");
+    }
+    ctx.state.emptyPolls = 0;
+    results.push(await runOneStep(ctx, claimRes));
+  }
+  return done(ctx.state.interrupted ? "interrupted" : "max_steps_reached");
+}
+
 export async function runLoop({
   client,
   problem,
@@ -95,128 +208,19 @@ export async function runLoop({
   sleepFn = defaultSleep,
   log = (msg) => process.stderr.write(`${redactKey(msg)}\n`),
 } = {}) {
-  if (!client) throw new Error("runLoop requires an API client.");
-  const slug = validateSlug(problem, "problem");
-  if (typeof cmd !== "string" || !cmd.trim()) {
-    throw new Error("runLoop requires a non-empty --cmd command.");
-  }
-  const limit = Number(maxSteps);
-  if (!Number.isFinite(limit) || limit <= 0) {
-    throw new Error("maxSteps must be a positive finite number.");
-  }
-
-  let interrupted = false;
-  let emptyPolls = 0;
-  const results = [];
+  const { slug, limit } = checkLoopArgs(client, problem, cmd, maxSteps);
+  const state = { interrupted: false, emptyPolls: 0 };
+  const ctx = {
+    client, slug, cmd, submit, waitOnEmpty, maxEmptyPolls, harness, model, cwd, leaseFile,
+    heartbeatIntervalMs, baseEnv, spawnCmdFn, runCheckFn, submitFn, sleepFn, log, state,
+  };
   const onSignal = () => {
-    interrupted = true;
+    state.interrupted = true;
   };
   process.on("SIGINT", onSignal);
   process.on("SIGTERM", onSignal);
-
   try {
-    for (let i = 0; i < limit && !interrupted; i++) {
-      const claimRes = await client.claim(slug, { harness, model });
-      if (!claimRes?.step || !claimRes?.lease) {
-        if (!waitOnEmpty || emptyPolls >= maxEmptyPolls || interrupted) {
-          return {
-            completedSteps: results.length,
-            results,
-            stoppedReason: interrupted ? "interrupted" : "no_open_steps",
-          };
-        }
-        emptyPolls += 1;
-        const waitSec = Number(claimRes?.retry_after_seconds) || 180;
-        log(`No open steps available; waiting ${waitSec}s...`);
-        await sleepFn(waitSec * 1000);
-        i -= 1;
-        continue;
-      }
-
-      emptyPolls = 0;
-      const { step, lease } = claimRes;
-      if (leaseFile) {
-        writeLeaseFile(leaseFile, buildLeaseRecord({ claimResult: claimRes, problem: slug, url: client.baseUrl }));
-      }
-
-      const hb = startHeartbeat({
-        client,
-        leaseId: lease.id,
-        intervalMs: heartbeatIntervalMs,
-        leaseFile,
-        registerSignals: false,
-        onError: (err) => log(`Heartbeat warning for step-${step.id}: ${safeErrorMessage(err)}`),
-      });
-
-      let outcome = { stepId: step.id, target: step.target, leaseId: lease.id, status: "released", reason: "other" };
-      let leased = true;
-
-      try {
-        const childEnv = buildChildEnv(baseEnv, step);
-        log(`Claimed step-${step.id} (${step.target}); running agent command...`);
-        const cmdRes = await spawnCmdFn(cmd, { cwd, env: childEnv });
-
-        if (interrupted) {
-          await releaseSafely(client, lease.id, "out_of_time", leaseFile);
-          leased = false;
-          outcome = { ...outcome, status: "released", reason: "out_of_time" };
-        } else if (cmdRes.code !== 0) {
-          log(`Agent command exited with code ${cmdRes.code} on step-${step.id}; releasing.`);
-          await releaseSafely(client, lease.id, "approach_blocked", leaseFile);
-          leased = false;
-          outcome = { ...outcome, status: "released", reason: "approach_blocked", cmdCode: cmdRes.code };
-        } else {
-          const checkRes = await runCheckFn({ cwd, target: step.target, env: childEnv });
-          if (!checkRes.ok) {
-            log(`Check failed for step-${step.id} (${step.target}); releasing.`);
-            await releaseSafely(client, lease.id, "approach_blocked", leaseFile);
-            leased = false;
-            outcome = { ...outcome, status: "released", reason: "approach_blocked", checkOk: false };
-          } else if (submit) {
-            const subRes = await submitFn({
-              cwd,
-              step,
-              leaseId: lease.id,
-              client,
-              leaseFile,
-              env: childEnv,
-            });
-            leased = false;
-            outcome = {
-              ...outcome,
-              status: "submitted",
-              reason: "submitted",
-              checkOk: true,
-              prUrl: subRes.prUrl || "",
-            };
-          } else {
-            await releaseSafely(client, lease.id, "other", leaseFile);
-            leased = false;
-            outcome = { ...outcome, status: "released", reason: "other", checkOk: true };
-          }
-        }
-      } catch (err) {
-        log(`Loop step-${step.id} error: ${safeErrorMessage(err)}`);
-        if (leased) {
-          try {
-            await releaseSafely(client, lease.id, "other", leaseFile);
-          } catch {
-            if (leaseFile) removeLeaseFile(leaseFile);
-          }
-        }
-        outcome = { ...outcome, status: "error", error: safeErrorMessage(err) };
-      } finally {
-        hb.stop();
-      }
-
-      results.push(outcome);
-    }
-
-    return {
-      completedSteps: results.length,
-      results,
-      stoppedReason: interrupted ? "interrupted" : "max_steps_reached",
-    };
+    return await loopSteps(ctx, limit);
   } finally {
     process.off("SIGINT", onSignal);
     process.off("SIGTERM", onSignal);

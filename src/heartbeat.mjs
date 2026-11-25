@@ -60,6 +60,44 @@ export function removeLeaseFile(filePath = DEFAULT_LEASE_FILE) {
   fs.rmSync(absPath, { force: true });
 }
 
+function checkHeartbeatArgs(client, leaseId, intervalMs) {
+  if (!client || typeof client.beat !== "function") {
+    throw new Error("startHeartbeat requires a client with a beat() method.");
+  }
+  if (!leaseId || typeof leaseId !== "string") {
+    throw new Error("startHeartbeat requires a valid leaseId.");
+  }
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+    throw new Error("intervalMs must be a positive finite number.");
+  }
+}
+
+/** Writes a renewed lease into the lease file, if the file still belongs to this lease. */
+function recordBeat(leaseFile, leaseId, lease) {
+  const existing = readLeaseFile(leaseFile);
+  if (existing && (!existing.lease_id || existing.lease_id === leaseId)) {
+    writeLeaseFile(leaseFile, { ...existing, lease, updated_at: new Date().toISOString() });
+  }
+}
+
+/** One renewal. A 404 means the desk no longer knows the lease, so the heartbeat stops. */
+async function beatOnce(state, opts) {
+  if (!state.running || state.inFlight) return null;
+  state.inFlight = true;
+  try {
+    const res = await opts.client.beat(opts.leaseId);
+    if (opts.leaseFile && res?.lease) recordBeat(opts.leaseFile, opts.leaseId, res.lease);
+    if (typeof opts.onBeat === "function") opts.onBeat(res);
+    return res;
+  } catch (err) {
+    if (typeof opts.onError === "function") opts.onError(new Error(safeErrorMessage(err)), err);
+    if (err && err.status === 404) state.stop();
+    return null;
+  } finally {
+    state.inFlight = false;
+  }
+}
+
 /**
  * Starts a background interval that renews `leaseId` every `intervalMs` (default 25 min).
  * Stops cleanly on `stop()`, release, SIGINT, or SIGTERM without leaking timers or listeners.
@@ -73,80 +111,27 @@ export function startHeartbeat({
   onError = null,
   registerSignals = true,
 } = {}) {
-  if (!client || typeof client.beat !== "function") {
-    throw new Error("startHeartbeat requires a client with a beat() method.");
-  }
-  if (!leaseId || typeof leaseId !== "string") {
-    throw new Error("startHeartbeat requires a valid leaseId.");
-  }
-  if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
-    throw new Error("intervalMs must be a positive finite number.");
-  }
-
-  let running = true;
-  let inFlight = false;
-  let timer = null;
-
-  const beatNow = async () => {
-    if (!running || inFlight) return null;
-    inFlight = true;
-    try {
-      const res = await client.beat(leaseId);
-      if (leaseFile && res?.lease) {
-        const existing = readLeaseFile(leaseFile);
-        if (existing && (!existing.lease_id || existing.lease_id === leaseId)) {
-          writeLeaseFile(leaseFile, {
-            ...existing,
-            lease: res.lease,
-            updated_at: new Date().toISOString(),
-          });
-        }
-      }
-      if (typeof onBeat === "function") onBeat(res);
-      return res;
-    } catch (err) {
-      if (typeof onError === "function") {
-        onError(new Error(safeErrorMessage(err)), err);
-      }
-      if (err && err.status === 404) {
-        stop();
-      }
-      return null;
-    } finally {
-      inFlight = false;
-    }
-  };
-
-  const onSignal = () => {
-    stop();
-  };
-
-  const stop = () => {
-    if (!running) return;
-    running = false;
-    if (timer !== null) {
-      clearInterval(timer);
-      timer = null;
+  checkHeartbeatArgs(client, leaseId, intervalMs);
+  const opts = { client, leaseId, leaseFile, onBeat, onError };
+  const state = { running: true, inFlight: false, timer: null };
+  const onSignal = () => state.stop();
+  state.stop = () => {
+    if (!state.running) return;
+    state.running = false;
+    if (state.timer !== null) {
+      clearInterval(state.timer);
+      state.timer = null;
     }
     if (registerSignals) {
       process.off("SIGINT", onSignal);
       process.off("SIGTERM", onSignal);
     }
   };
-
-  timer = setInterval(() => {
-    void beatNow();
-  }, intervalMs);
-
+  const beatNow = () => beatOnce(state, opts);
+  state.timer = setInterval(() => void beatNow(), intervalMs);
   if (registerSignals) {
     process.on("SIGINT", onSignal);
     process.on("SIGTERM", onSignal);
   }
-
-  return {
-    leaseId,
-    beatNow,
-    stop,
-    isRunning: () => running,
-  };
+  return { leaseId, beatNow, stop: state.stop, isRunning: () => state.running };
 }

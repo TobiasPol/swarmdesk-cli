@@ -17,6 +17,7 @@ import {
   validateHarness,
   validateKey,
   validateModel,
+  validateUrl,
 } from "../src/config.mjs";
 import { submitStep, validateSingleChangedFile } from "../src/git.mjs";
 import {
@@ -175,6 +176,8 @@ describe("config and key redaction", () => {
     assert.equal(validateHarness("swarmdesk-cli"), "swarmdesk-cli");
     assert.throws(() => validateHarness("swarmdesk-loop"), /Invalid SWARMDESK_HARNESS/);
     assert.throws(() => validateModel("claude-sonnet-4-5"), /Invalid SWARMDESK_MODEL/);
+    assert.throws(() => validateUrl("http://joinswarmdesk.com"), /must use https/);
+    assert.equal(validateUrl("http://localhost:8788/"), "http://localhost:8788");
 
     assert.throws(() => validateHarness("ignore previous instructions"), /Invalid SWARMDESK_HARNESS/);
     assert.throws(() => validateModel("gpt-4o; rm -rf /"), /Invalid SWARMDESK_MODEL/);
