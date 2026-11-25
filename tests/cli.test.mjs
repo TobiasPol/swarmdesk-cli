@@ -167,11 +167,14 @@ describe("config and key redaction", () => {
     const cfg = loadConfig({
       SWARMDESK_KEY: TEST_KEY,
       SWARMDESK_HARNESS: "claude-code",
-      SWARMDESK_MODEL: "claude-sonnet-4-5",
+      SWARMDESK_MODEL: "claude-sonnet",
     });
     assert.equal(cfg.url, DEFAULT_URL);
     assert.equal(cfg.harness, "claude-code");
-    assert.equal(cfg.model, "claude-sonnet-4-5");
+    assert.equal(cfg.model, "claude-sonnet");
+    assert.equal(validateHarness("swarmdesk-cli"), "swarmdesk-cli");
+    assert.throws(() => validateHarness("swarmdesk-loop"), /Invalid SWARMDESK_HARNESS/);
+    assert.throws(() => validateModel("claude-sonnet-4-5"), /Invalid SWARMDESK_MODEL/);
 
     assert.throws(() => validateHarness("ignore previous instructions"), /Invalid SWARMDESK_HARNESS/);
     assert.throws(() => validateModel("gpt-4o; rm -rf /"), /Invalid SWARMDESK_MODEL/);

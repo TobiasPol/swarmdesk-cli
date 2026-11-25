@@ -2,20 +2,38 @@ export const KEY_RE = /^sd_[0-9a-f]{32}$/;
 export const KEY_GLOBAL_RE = /\bsd_[0-9a-f]{32}\b/gi;
 export const DEFAULT_URL = "https://joinswarmdesk.com";
 
+// These two lists must equal AGENT_HARNESSES and AGENT_MODELS in the site's
+// platform/src/lib/telemetry.ts: the site stores any other value as empty, without an error.
 export const ALLOWED_HARNESSES = Object.freeze([
   "claude-code",
+  "cursor",
   "codex",
   "gemini-cli",
-  "opencode",
+  "antigravity",
   "aider",
-  "cursor",
+  "openhands",
+  "opencode",
   "goose",
-  "swarmdesk-loop",
-  "custom",
+  "swarmdesk-cli",
+  "custom-script",
+  "human",
+]);
+
+export const ALLOWED_MODELS = Object.freeze([
+  "claude-opus",
+  "claude-sonnet",
+  "gpt-5",
+  "codex",
+  "gemini-pro",
+  "gemini-flash",
+  "o3",
+  "deepseek",
+  "local-open",
+  "other",
 ]);
 
 const HARNESS_SET = new Set(ALLOWED_HARNESSES);
-export const MODEL_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:/-]{0,63}$/;
+const MODEL_SET = new Set(ALLOWED_MODELS);
 export const SLUG_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/;
 
 export class ConfigError extends Error {
@@ -107,13 +125,13 @@ export function validateHarness(raw) {
 
 export function validateModel(raw) {
   if (raw === undefined || raw === null || String(raw).trim() === "") return undefined;
-  const trimmed = String(raw).trim();
-  if (!MODEL_RE.test(trimmed)) {
+  const normalized = String(raw).trim().toLowerCase();
+  if (!MODEL_SET.has(normalized)) {
     throw new ConfigError(
-      "Invalid SWARMDESK_MODEL (expected 1-64 identifier chars: letters, digits, ., _, :, /, -).",
+      `Invalid SWARMDESK_MODEL "${redactKey(normalized)}". Allowed: ${ALLOWED_MODELS.join(", ")}`,
     );
   }
-  return trimmed;
+  return normalized;
 }
 
 export function validateSlug(raw, label = "problem") {

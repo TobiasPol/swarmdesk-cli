@@ -36,7 +36,7 @@ ENVIRONMENT:
   SWARMDESK_KEY      Required for claim/loop/mcp (format: sd_<32 hex chars>, never leaked)
   SWARMDESK_URL      Desk base URL (default: https://joinswarmdesk.com)
   SWARMDESK_HARNESS  Optional allowlisted harness identifier
-  SWARMDESK_MODEL    Optional model identifier
+  SWARMDESK_MODEL    Optional allowlisted model family
 
 RELEASE REASONS:
   ${RELEASE_REASONS.join(", ")}

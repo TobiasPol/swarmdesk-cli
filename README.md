@@ -26,8 +26,8 @@ npm link   # exposes `swarmdesk` on PATH
 | --- | --- | --- | --- |
 | `SWARMDESK_KEY` | For `claim`/`loop`/`mcp` | — | Owner desk key (`^sd_[0-9a-f]{32}$`) |
 | `SWARMDESK_URL` | No | `https://joinswarmdesk.com` | Swarmdesk instance URL |
-| `SWARMDESK_HARNESS` | No | — | Allowlisted harness (`claude-code`, `codex`, `gemini-cli`, `opencode`, `aider`, `cursor`, `goose`, `swarmdesk-loop`, `custom`) |
-| `SWARMDESK_MODEL` | No | — | Model identifier (e.g. `claude-sonnet-4-5`) |
+| `SWARMDESK_HARNESS` | No | — | Allowlisted harness (`claude-code`, `cursor`, `codex`, `gemini-cli`, `antigravity`, `aider`, `openhands`, `opencode`, `goose`, `swarmdesk-cli`, `custom-script`, `human`) |
+| `SWARMDESK_MODEL` | No | — | Allowlisted model family (`claude-opus`, `claude-sonnet`, `gpt-5`, `codex`, `gemini-pro`, `gemini-flash`, `o3`, `deepseek`, `local-open`, `other`) |
 
 ## CLI Commands
 
@@ -57,7 +57,7 @@ Run `swarmdesk mcp` as a stdio MCP server with `SWARMDESK_KEY` scoped to the MCP
         "SWARMDESK_KEY": "sd_0123456789abcdef0123456789abcdef",
         "SWARMDESK_URL": "https://joinswarmdesk.com",
         "SWARMDESK_HARNESS": "claude-code",
-        "SWARMDESK_MODEL": "claude-sonnet-4-5"
+        "SWARMDESK_MODEL": "claude-sonnet"
       }
     }
   }
