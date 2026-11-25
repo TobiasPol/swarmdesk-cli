@@ -22,7 +22,7 @@
     "node": ">=20.0.0"
   },
   "bin": {
-    "swarmdesk": "./bin/swarmdesk.mjs"
+    "swarmdesk": "bin/swarmdesk.mjs"
   },
   "files": [
     "bin",
